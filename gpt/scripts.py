@@ -5,44 +5,15 @@ import argparse
 from gpt import MBR, MBR_Partition, GPTHeader
 from gpt import encode_mbr, decode_mbr
 from gpt import encode_gpt_header, decode_gpt_header
-
-
-# zero terminated string buffer to string
-def zts_to_str(buf):
-    return buf.split(b'\0', 1)[0]
-
-
-def decode_guid(guid_as_bytes):
-    return uuid.UUID(bytes_le=guid_as_bytes)
-
-
-'''
-def is_gpt_partition_unused(partition_type_guid):
-    return PARTITION_TYPE_GUIDS.get(str(partition_type_guid).upper(),
-                                    '') == 'Unused Entry'
-
-
-def decode_gpt_partition_type_guid(partition_type_guid):
-    return PARTITION_TYPE_GUIDS.get(str(partition_type_guid).upper(),
-                                    'UNKNOWN')
-'''
-
-
-def decode_gpt_partition_entry_attribute(attribute_value):
-    r = []
-    if (attribute_value & 0x1):
-        r.append('Required Partition')
-    if (attribute_value & 0x2):
-        r.append('No Block IO Protocol')
-    if (attribute_value & 0x4):
-        r.append('Legacy BIOS Bootable')
-    return r
+from gpt import encode_gpt_partition_entry_array
+from gpt import decode_gpt_partition_entry_array
+from gpt import calculate_partition_entry_array_crc32
 
 
 def tprint(title, formatting, *params):
     s = formatting % params
-    print('%s:' % title, end='')
-    print(' ' * (40 - len(s) - len(title)), end='')
+    print('%s: ' % title, end='')
+    print(' ' * (72 - len(s) - len(title)), end='')
     print(s)
 
 
@@ -58,13 +29,13 @@ def display_mbr_partition(i, mbr_partition):
         bootable_str = 'No'
 
     cprint(i, 'BootIndicator', '0x%X', mbr_partition.boot_indicator)
-    cprint(i, 'Is Bootable? (synth)', '%s', bootable_str)
+    cprint(i, 'Is Bootable? (syn)', '%s', bootable_str)
     cprint(i, 'StartingCHS', '%d, %d, %d',
            mbr_partition.start_chs[0],
            mbr_partition.start_chs[1],
            mbr_partition.start_chs[2])
     cprint(i, 'OSType', '0x%X',  mbr_partition.os_type)
-    cprint(i, 'OSType (synth)', '%s',  mbr_partition.os_type_as_str())
+    cprint(i, 'OSType (syn)', '%s',  mbr_partition.os_type_as_str())
     cprint(i, 'EndingCHS', '%d, %d, %d',
            mbr_partition.end_chs[0],
            mbr_partition.end_chs[1],
@@ -81,49 +52,13 @@ def display_mbr(mbr):
 
     print('<<< MBR >>>')
     print('BootCode: 0x%s' % mbr.bootstrap_code.hex())
-    print('UniqueMBRDiskSignature: 0x%s' % mbr.unique_mbr_disk_signature.hex())
-    print('Unknown: 0x%s' % mbr.unknown.hex())
+    tprint('UniqueMBRDiskSignature', '0x%s', 
+            mbr.unique_mbr_disk_signature.hex())
+    tprint('Unknown', '0x%s', mbr.unknown.hex())
     print('PartitionRecord: 0x%s' % mbr.partition_record.hex())
-    print('Signature: 0x%X' % mbr.signature)
+    tprint('Signature', '0x%X', mbr.signature)
     for i in range(0, 4):
         display_mbr_partition(i, mbr.partitions[i])
-
-
-def display_gpt_partition_entry_array(data):
-    pass
-
-
-'''
-    (partition_type_guid_raw,
-     unique_partition_guid_raw,
-     starting_lba,
-     ending_lba,
-     attributes,
-     partition_name_raw) = unpack('< 16s 16s Q Q Q 72s',
-                                  data)
-    partition_type_guid = decode_guid(partition_type_guid_raw)
-    if (show_unused or not is_gpt_partition_unused(partition_type_guid)):
-
-        partition_type_guid_decoded = (
-            decode_gpt_partition_type_guid(partition_type_guid))
-
-        unique_partition_guid = decode_guid(
-            unique_partition_guid_raw)
-
-        partition_name = zts_to_str(partition_name_raw)
-
-        print('<<< GPT Partition Entry #%d >>>' % i)
-        print('PartitionTypeGUID: %s' % partition_type_guid_raw.hex())
-        print('PartitionTypeGUID (decoded): %s' % partition_type_guid_decoded)
-        print('UniquePartitionGUID: %s' % unique_partition_guid_raw.hex())
-        print('UniquePartitionGUID (decoded): %s' % unique_partition_guid)
-        print('StartingLBA: %d' % starting_lba)
-        print('EndingLBA: %d' % ending_lba)
-        print('Attributes: 0x%x' % attributes)
-        print('Attributes (decoded): %s' %
-              decode_gpt_partition_entry_attribute(attributes))
-        print('PartitionName: %s' % partition_name.hex())
-'''
 
 
 def display_gpt_header(gpt_header):
@@ -156,41 +91,25 @@ def display_gpt_header(gpt_header):
            gpt_header.partition_entry_array_crc32)
 
 
-'''
-        gpt_header = data[0:92]
-        (partition_entry_lba,
-         number_of_partition_entries,
-         size_of_partition_entry,
-         partition_entry_array_crc32) = parse_gpt_header(gpt_header)
-        data = data[lbads:]
-        partition_entry_array_size = (
-            number_of_partition_entries * size_of_partition_entry)
-        required_number_of_blocks = (
-            math.ceil(partition_entry_array_size / lbads))
-        if len(data) < (required_number_of_blocks * lbads):
-            print('not enough data to read GPT Partitions')
-            print('provide at least %d blocks/%d bytes more input' %
-                  (required_number_of_blocks,
-                   required_number_of_blocks * lbads))
-            sys.exit()
-        partition_entry_array = data[0:partition_entry_array_size]
-        partition_entry_array_crc32_calculated = binascii.crc32(
-            partition_entry_array)
-        if (partition_entry_array_crc32 ==
-           partition_entry_array_crc32_calculated):
-            partition_entry_array_crc32_result = 'matched'
-        else:
-            partition_entry_array_crc32_result = 'unmatched'
+def display_gpt_partition_entry(i, entry):
+    print('<<< GPT Partition Entry #%d >>>' % i)
+    cprint(i, 'PartitionTypeGUID', '0x%s', entry.partition_type_guid_raw.hex())
+    cprint(i, 'PartitionTypeGUID (syn)', '%s', entry.partition_type_guid)
+    cprint(i, 'PartitionType (syn)', '%s', entry.partition_type)
+    cprint(i, 'UniquePartitionGUID', '0x%s', entry.unique_partition_guid_raw.hex())
+    cprint(i, 'UniquePartitionGUID (syn)', '%s', entry.unique_partition_guid)
+    cprint(i, 'StartingLBA', '%d', entry.starting_lba)
+    cprint(i, 'EndingLBA', '%d', entry.ending_lba)
+    cprint(i, 'Attributes', '0x%x', entry.attributes_raw)
+    cprint(i, 'Attributes (syn)', '%s', entry.attributes)
+    print('#%d.PartitionName: 0x%s' % (i, entry.partition_name_raw.hex()))
+    cprint(i, 'PartitionName (syn)', '%s', entry.partition_name)
 
-        print('PartitionEntryArrayCRC32 (calculated): %x %s' %
-              (partition_entry_array_crc32_calculated,
-               partition_entry_array_crc32_result))
 
-        for i in range (0, number_of_partition_entries):
-            offset = i * size_of_partition_entry
-            partition_record = data[offset:offset + size_of_partition_entry]
-            parse_gpt_partition(i, partition_record, show_unused)
-'''
+def display_gpt_partition_entry_array(entries, size, count, showall):
+    for i in range(0, count):
+        if showall or not entries[i].is_empty():
+            display_gpt_partition_entry(i, entries[i])
 
 
 def print_mbr():
@@ -259,6 +178,12 @@ def print_gpt_partition_entry_array():
                         type=int,
                         default=128,
                         dest='count')
+    parser.add_argument('-a',
+                        '--all',
+                        help='Show all (also unused) partition entries (default: false)',
+                        action='store_true',
+                        default=False,
+                        dest='showall')
     args = parser.parse_args()
     if args.file is None:
         data = sys.stdin.buffer.read()
@@ -266,17 +191,24 @@ def print_gpt_partition_entry_array():
         with open(args.file, 'rb') as f:
             data = f.read()
 
-    data = sys.stdin.read()
     required = args.size * args.count
     if len(data) < required:
-        print('Error: Please provide at least %d bytes of input' % required)
+        print('Error: Please provide %d bytes of input' % required)
         sys.exit()
 
     if len(data) > required:
         print('Warning: Using only the first %d bytes of input' % required)
 
     gpt_partition_entry_array = decode_gpt_partition_entry_array(
-        data[0:required],
+        data,
         args.size,
         args.count)
-    display_gpt_partition_entry_array(gpt_partition_entry_array)
+    display_gpt_partition_entry_array(
+            gpt_partition_entry_array,
+            args.size,
+            args.count,
+            args.showall)
+    calculated_array_crc32 = calculate_partition_entry_array_crc32(data)
+    print('<<< Calculated >>>')
+    tprint('PartitionEntryArrayCRC32 (calculated)', '0x%x',
+            calculated_array_crc32)
