@@ -1,24 +1,53 @@
 import binascii
+import uuid
 from struct import pack, unpack
 
-OS_TYPES = {}
-OS_TYPES[0x00] = 'Empty'
-OS_TYPES[0xEE] = 'GPT Protective'
-OS_TYPES[0xEF] = 'UEFI System Partition'
+OS_TYPES = {
+    0x00: 'Empty',
+    0xEE: 'GPT Protective',
+    0xEF: 'UEFI System Partition'
+}
 
-PARTITION_TYPE_GUIDS = {}
-PARTITION_TYPE_GUIDS['00000000-0000-0000-0000-000000000000'] = 'Unused Entry'
-PARTITION_TYPE_GUIDS['024DEE41-33E7-11D3-9D69-0008C781F39F'] = 'Legacy MBR'
-PARTITION_TYPE_GUIDS['C12A7328-F81F-11D2-BA4B-00A0C93EC93B'] = \
-    'EFI System Partition'
-PARTITION_TYPE_GUIDS['21686148-6449-6E6F-744E-656564454649'] = \
-    'BIOS boot partition'
-PARTITION_TYPE_GUIDS['0FC63DAF-8483-4772-8E79-3D69D8477DE4'] = \
-    'Linux filesystem data'
-PARTITION_TYPE_GUIDS['4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709'] = \
-    'Root partition (x86-64)'
-PARTITION_TYPE_GUIDS['0657FD6D-A4AB-43C4-84E5-0933C84B4F4F'] = \
-    'Swap partition'
+PARTITION_TYPE_GUIDS = {
+    '024DEE41-33E7-11D3-9D69-0008C781F39F': 'Legacy MBR',
+    'C12A7328-F81F-11D2-BA4B-00A0C93EC93B': 'EFI System Partition',
+    '21686148-6449-6E6F-744E-656564454649': 'BIOS boot partition',
+    '0FC63DAF-8483-4772-8E79-3D69D8477DE4': 'Linux filesystem data',
+    '4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709': 'Root partition (x86-64)',
+    '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F': 'Swap partition',
+    '7C3457EF-0000-11AA-AA11-00306543ECAC': 'Apple APFS'
+}
+
+
+def decode_gpt_partition_type_guid(guid):
+    if isinstance(guid, uuid.UUID):
+        guid = str(guid)
+
+    guid = guid.upper()
+    return PARTITION_TYPE_GUIDS.get(guid, '?')
+
+def decode_gpt_partition_entry_attributes(attribute_value):
+    r = []
+    if (attribute_value & 0x1):
+        r.append('Required Partition')
+    if (attribute_value & 0x2):
+        r.append('No Block IO Protocol')
+    if (attribute_value & 0x4):
+        r.append('Legacy BIOS Bootable')
+    return r
+
+
+# guid bytes to guid object
+def decode_guid(guid_as_bytes):
+    return uuid.UUID(bytes_le=guid_as_bytes)
+
+
+# this is a funny field
+# it is utf-16 encoded
+# and padded with zeros, so like a null terminated string
+def nts_to_str(buf):
+    s = buf.decode('utf-16')
+    return s.split('\0', 1)[0]
 
 
 class MBR_Partition():
@@ -117,8 +146,33 @@ class GPTHeader():
 
 
 class GPTPartitionEntry():
-    def __init__(self):
-        pass
+    def __init__(
+            self,
+            partition_type_guid,
+            unique_partition_guid,
+            starting_lba,
+            ending_lba,
+            attributes,
+            partition_name):
+        self.partition_type_guid_raw = partition_type_guid
+        self.partition_type_guid = decode_guid(partition_type_guid)
+        self.partition_type = decode_gpt_partition_type_guid(
+                self.partition_type_guid)
+        self.unique_partition_guid_raw = unique_partition_guid
+        self.unique_partition_guid = decode_guid(unique_partition_guid)
+        self.starting_lba = starting_lba
+        self.ending_lba = ending_lba
+        self.attributes_raw = attributes
+        self.attributes = decode_gpt_partition_entry_attributes(attributes)
+        self.partition_name_raw = partition_name
+        self.partition_name = nts_to_str(partition_name)
+
+    def is_empty(self):
+        return all(x == 0 for x in self.partition_type_guid_raw)
+
+
+def calculate_partition_entry_array_crc32(data):
+    return binascii.crc32(data)
 
 
 def encode_mbr(mbr):
@@ -151,7 +205,7 @@ def decode_mbr(data):
      unique_mbr_disk_signature,
      unknown,
      partition_record,
-     signature) = unpack('< 440s 4s 2s 64s H', data)
+     signature) = unpack('< 440s 4s 2s 64s H', data[0:512])
     partitions = []
     for i in range(0, 4):
         offset = i * 16
@@ -187,7 +241,23 @@ def decode_mbr(data):
 
 
 def encode_gpt_header(gpt_header):
-    pass
+    data = pack(
+            '< 8s 4s I I 4s Q Q Q Q 16s Q I I I',
+            gpt_header.signature,
+            gpt_header.revision,
+            gpt_header.header_size,
+            gpt_header.header_crc32,
+            gpt_header.reserved,
+            gpt_header.my_lba,
+            gpt_header.alternate_lba,
+            gpt_header.first_usable_lba,
+            gpt_header.last_usable_lba,
+            gpt_header.disk_guid,
+            gpt_header.partition_entry_lba,
+            gpt_header.number_of_partition_entries,
+            gpt_header.size_of_partition_entry,
+            gpt_header.partition_entry_array_crc32)
+    return data
 
 
 def decode_gpt_header(data):
@@ -206,7 +276,7 @@ def decode_gpt_header(data):
      size_of_partition_entry,
      partition_entry_array_crc32) = unpack(
          '< 8s 4s I I 4s Q Q Q Q 16s Q I I I',
-         data)
+         data[0:92])
     gpt_header = GPTHeader(signature,
                            revision,
                            header_size,
@@ -222,3 +292,51 @@ def decode_gpt_header(data):
                            size_of_partition_entry,
                            partition_entry_array_crc32)
     return gpt_header
+
+
+def encode_gpt_partition_entry(gpt_partition_entry):
+    data = pack('<16s 16s Q Q Q 72s',
+            gpt_partition_entry.partition_type_guid_raw,
+            gpt_partition_entry.unique_partition_guid_raw,
+            gpt_partition_entry.start_lba,
+            gpt_partition_entry.ending_lba,
+            gpt_partition_entry.attributes,
+            gpt_partition_entry.partition_name_raw)
+    return data
+
+
+def decode_gpt_partition_entry(data):
+    (partition_type_guid,
+     unique_partition_guid,
+     starting_lba,
+     ending_lba,
+     attributes,
+     partition_name) = unpack('< 16s 16s Q Q Q 72s', data[0:128])
+    return GPTPartitionEntry(
+            partition_type_guid,
+            unique_partition_guid,
+            starting_lba,
+            ending_lba,
+            attributes,
+            partition_name)
+
+
+def encode_gpt_partition_entry_array(gpt_partition_entries, size, count):
+    data = bytes()
+    for i in range(0, count):
+        d = encode_gpt_partition_entry(gpt_partition_entries[i])
+        data.append(d)
+        # fill with zeroes if less than size
+        if len(d) < size:
+            data.append(bytes(size - len(d)))
+    return data
+
+
+def decode_gpt_partition_entry_array(data, size, count):
+    entries = []
+    for i in range(0, count):
+        offset = i * size
+        gpt_partition_entry = decode_gpt_partition_entry(
+                data[offset:offset+size])
+        entries.append(gpt_partition_entry)
+    return entries
