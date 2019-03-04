@@ -168,12 +168,12 @@ def decode_mbr(data):
                                partition_record[offset:offset + 16])
         partition = MBR_Partition(boot_indicator,
                                   os_type,
-                                  (start_head,
-                                   start_sector,
-                                   start_track),
-                                  (end_head,
-                                   end_sector,
-                                   end_track),
+                                  (start_track,
+                                   start_head,
+                                   start_sector),
+                                  (end_track,
+                                   end_head,
+                                   end_sector),
                                   (starting_lba, size_in_lba))
         partitions.append(partition)
 
